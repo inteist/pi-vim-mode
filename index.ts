@@ -61,6 +61,27 @@ import {
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 const BRACKETED_PASTE_END_TAIL = BRACKETED_PASTE_END.slice(1);
+// Karabiner's Nash mappings encode Command as F17 followed by an arrow.
+// Accept xterm and Kitty F17, including press/repeat events and lock modifiers.
+/* eslint-disable-next-line no-control-regex */
+const COMMAND_PREFIX = /^\x1b\[(?:31(?:;1)?~|57380(?:;(?:1|65|129|193)(?::[12])?)?u)/;
+
+function matchesCommandArrow(data: string, arrow: "up" | "down"): boolean {
+  // Pi aliases the legacy package to its current runtime. Older pi-tui peers
+  // lack Key.super (and would silently treat "super+up" as plain "up").
+  const superKey = (Key as typeof Key & {
+    super?: (key: "up" | "down") => Parameters<typeof matchesKey>[1];
+  }).super;
+  if (superKey && matchesKey(data, superKey(arrow))) return true;
+
+  /* eslint-disable-next-line no-control-regex */
+  const match = /^\x1b\[(1|57352|57353);(?:9|73|137|201)(?::[12])?([ABu])$/.exec(data);
+  if (!match) return false;
+  return match[1] === "1"
+    ? match[2] === (arrow === "up" ? "A" : "B")
+    : match[1] === (arrow === "up" ? "57352" : "57353") && match[2] === "u";
+}
+
 const MAX_COUNT = 9999;
 const PI_NATIVE_CLIPBOARD_TIMEOUT_MS = 5000;
 const SOFTWARE_CURSOR_START = "\x1b[7m";
@@ -743,6 +764,7 @@ export class ModalEditor extends CustomEditor {
   private pendingG: boolean = false;
   private pendingGCount: string = "";
   private pendingReplace: boolean = false;
+  private pendingCommandPrefix: boolean = false;
   private pendingExCommand: string | null = null;
   private acceptingBracketedPasteInExCommand: boolean = false;
   private pendingEscWhileAcceptingBracketedPasteInExCommand: boolean = false;
@@ -1188,6 +1210,7 @@ export class ModalEditor extends CustomEditor {
     this.pendingG = false;
     this.pendingGCount = "";
     this.pendingReplace = false;
+    this.pendingCommandPrefix = false;
     this.clearPendingExCommand();
   }
 
@@ -1338,11 +1361,40 @@ export class ModalEditor extends CustomEditor {
       data = filtered;
     }
 
+    const isPasting = (this as unknown as { isInPaste?: boolean }).isInPaste;
+    if (isPasting) {
+      this.pendingCommandPrefix = false;
+    } else {
+      const prefix = COMMAND_PREFIX.exec(data);
+      if (prefix) {
+        this.pendingCommandPrefix = true;
+        data = data.slice(prefix[0].length);
+        if (data.length === 0) return;
+      }
+      if (this.pendingCommandPrefix) {
+        this.pendingCommandPrefix = false;
+        // Normalize before repeat recording so replay never needs prefix state.
+        // Unrecognized suffixes retain their ordinary editor behavior.
+        if (matchesKey(data, Key.up)) data = "\x1b[1;9A";
+        else if (matchesKey(data, Key.down)) data = "\x1b[1;9B";
+      }
+    }
+
     this.prepareRepeatRecordingForInput(data);
     try {
       if (this.isEscapeLikeInput(data)) {
         this.handleEscape();
         return;
+      }
+
+      if (!isPasting) {
+        const toStart = matchesCommandArrow(data, "up");
+        if (toStart || matchesCommandArrow(data, "down")) {
+          this.clearPendingState();
+          if (this.mode !== "insert") this.cancelRepeatableCommand();
+          this.moveCursorToAbsoluteIndex(toStart ? 0 : this.getText().length);
+          return;
+        }
       }
 
       if ("insert" === this.mode) {
