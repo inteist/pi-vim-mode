@@ -448,6 +448,7 @@ function isClipboardEnvironmentFailure(error: unknown): boolean {
 const PI_CODING_AGENT_MODULE_URL = import.meta.resolve(
   "@earendil-works/pi-coding-agent",
 );
+const PI_TUI_MODULE_URL = import.meta.resolve("@earendil-works/pi-tui");
 const CLIPBOARD_HELPER_SOURCE = `
 import { copyToClipboard } from ${JSON.stringify(PI_CODING_AGENT_MODULE_URL)};
 
@@ -461,15 +462,47 @@ try {
 } catch {}
 `;
 
+// Mirrors Pi's readClipboardText(): Linux tools first, then the native helper.
+// Exit 0 with empty output means "no text"; a non-zero exit means "unavailable".
 const CLIPBOARD_READ_HELPER_SOURCE = `
-import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
+import { getNativeClipboard } from ${JSON.stringify(PI_TUI_MODULE_URL)};
 
-const require = createRequire(${JSON.stringify(PI_CODING_AGENT_MODULE_URL)});
-const clipboard = require("@mariozechner/clipboard");
-if (!await clipboard.hasText()) {
-  process.exit(0);
+function linuxClipboardCommands() {
+  if (process.platform !== "linux") return [];
+  const commands = [];
+  if (process.env.TERMUX_VERSION) commands.push(["termux-clipboard-get", []]);
+  if (process.env.WAYLAND_DISPLAY) {
+    commands.push(["wl-paste", ["--no-newline", "--type", "text"]]);
+  }
+  if (process.env.DISPLAY) {
+    commands.push(
+      ["xclip", ["-selection", "clipboard", "-out"]],
+      ["xsel", ["--clipboard", "--output"]],
+    );
+  }
+  return commands;
 }
-const text = await clipboard.getText();
+
+function readWithCommand() {
+  for (const [command, args] of linuxClipboardCommands()) {
+    const result = spawnSync(command, args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    if (!result.error && result.status === 0) return result.stdout || null;
+  }
+  return undefined;
+}
+
+const commandText = readWithCommand();
+const text =
+  commandText === undefined
+    ? await getNativeClipboard()?.getText()
+    : commandText;
+if (text === undefined) {
+  process.exit(1);
+}
 if (typeof text === "string") {
   process.stdout.write(text);
 }
