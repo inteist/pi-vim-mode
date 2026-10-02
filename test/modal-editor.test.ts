@@ -1795,11 +1795,19 @@ describe("cursor shape rendering", () => {
     assertNoCursorShapeSequences(enabledLines);
   });
 
-  it("keeps the software cursor when focused render has no cursor marker", () => {
+  it("keeps the software cursor when focused render has no cursor marker", (t) => {
     const tui = createCursorShapeTui({ initialShowHardwareCursor: true });
     const editor = new ModalEditor(tui, stubTheme, stubKeybindings);
-    const internal = editor as unknown as { autocompleteState?: string | null };
-    internal.autocompleteState = "regular";
+    // pi-tui always emits the marker while focused, so drop it from the base render.
+    const baseEditor = Object.getPrototypeOf(ModalEditor.prototype) as {
+      render(width: number): string[];
+    };
+    const baseRender = baseEditor.render;
+    t.mock.method(baseEditor, "render", function (this: unknown, width: number) {
+      return baseRender
+        .call(this, width)
+        .map((line) => line.replaceAll(CURSOR_MARKER, ""));
+    });
     focusEditor(editor);
 
     const lines = editor.render(20);
