@@ -379,33 +379,36 @@ type HelperRunResult = {
 
 const CLIPBOARD_HELPER_TEST_TIMEOUT_MS = 5_000;
 
-async function getClipboardHelperSourceWithMock(
+async function getHelperSourceWithMockModule(
+  helperName: string,
+  importedName: string,
+  moduleUrlName: string,
   mockModuleSource: string,
 ): Promise<string> {
   const indexSource = await readFile(
     new URL("../index.ts", import.meta.url),
     "utf8",
   );
-  const match = /const CLIPBOARD_HELPER_SOURCE = `([\s\S]*?)`;/.exec(
+  const match = new RegExp(`const ${helperName} = \`([\\s\\S]*?)\`;`).exec(
     indexSource,
   );
 
-  assert.ok(match, "CLIPBOARD_HELPER_SOURCE not found");
-  assert.ok(match[1], "CLIPBOARD_HELPER_SOURCE was empty");
+  assert.ok(match, `${helperName} not found`);
+  assert.ok(match[1], `${helperName} was empty`);
 
   const mockModuleUrl = `data:text/javascript,${encodeURIComponent(mockModuleSource)}`;
   const helperImportLine = [
-    "import { copyToClipboard } from ",
+    `import { ${importedName} } from `,
     "$",
-    "{JSON.stringify(PI_CODING_AGENT_MODULE_URL)};",
+    `{JSON.stringify(${moduleUrlName})};`,
   ].join("");
-  const replacementImportLine = `import { copyToClipboard } from ${JSON.stringify(mockModuleUrl)};`;
+  const replacementImportLine = `import { ${importedName} } from ${JSON.stringify(mockModuleUrl)};`;
   const helperSource = match[1];
 
   assert.equal(
     helperSource.includes(helperImportLine),
     true,
-    "clipboard helper import not found",
+    `${helperName} import not found`,
   );
 
   const mockedSource = helperSource.replace(
@@ -416,66 +419,42 @@ async function getClipboardHelperSourceWithMock(
   assert.notEqual(
     mockedSource,
     helperSource,
-    "clipboard helper import was not replaced",
+    `${helperName} import was not replaced`,
   );
   assert.equal(
     mockedSource.includes(helperImportLine),
     false,
-    "real clipboard helper import remains",
+    `real ${helperName} import remains`,
   );
   assert.equal(
     mockedSource.includes(replacementImportLine),
     true,
-    "mock clipboard import missing",
+    `mock ${helperName} import missing`,
   );
 
   return mockedSource;
 }
 
-async function getClipboardReadHelperSourceWithMock(
-  mockClipboardExpression: string,
+function getClipboardHelperSourceWithMock(
+  mockModuleSource: string,
 ): Promise<string> {
-  const indexSource = await readFile(
-    new URL("../index.ts", import.meta.url),
-    "utf8",
+  return getHelperSourceWithMockModule(
+    "CLIPBOARD_HELPER_SOURCE",
+    "copyToClipboard",
+    "PI_CODING_AGENT_MODULE_URL",
+    mockModuleSource,
   );
-  const match = /const CLIPBOARD_READ_HELPER_SOURCE = `([\s\S]*?)`;/.exec(
-    indexSource,
-  );
+}
 
-  assert.ok(match, "CLIPBOARD_READ_HELPER_SOURCE not found");
-  assert.ok(match[1], "CLIPBOARD_READ_HELPER_SOURCE was empty");
-
-  const requireLine = [
-    "const require = createRequire(",
-    "$",
-    "{JSON.stringify(PI_CODING_AGENT_MODULE_URL)});",
-  ].join("");
-  const clipboardLine = 'const clipboard = require("@mariozechner/clipboard");';
-  const replacement = `const clipboard = ${mockClipboardExpression};`;
-  const helperSource = match[1];
-  const mockedSource = helperSource.replace(
-    `${requireLine}\n${clipboardLine}`,
-    replacement,
+function getClipboardReadHelperSourceWithMock(
+  mockModuleSource: string,
+): Promise<string> {
+  return getHelperSourceWithMockModule(
+    "CLIPBOARD_READ_HELPER_SOURCE",
+    "getNativeClipboard",
+    "PI_TUI_MODULE_URL",
+    mockModuleSource,
   );
-
-  assert.notEqual(
-    mockedSource,
-    helperSource,
-    "clipboard read helper require was not replaced",
-  );
-  assert.equal(
-    mockedSource.includes(clipboardLine),
-    false,
-    "real clipboard read helper require remains",
-  );
-  assert.equal(
-    mockedSource.includes(replacement),
-    true,
-    "mock clipboard object missing",
-  );
-
-  return mockedSource;
 }
 
 function runClipboardHelperSource(
@@ -488,6 +467,13 @@ function runClipboardHelperSource(
       ["--input-type=module", "-e", source],
       {
         stdio: ["pipe", "pipe", "pipe"],
+        // Keep the read helper off real Linux clipboard tools so it reaches the mock.
+        env: {
+          ...process.env,
+          DISPLAY: undefined,
+          WAYLAND_DISPLAY: undefined,
+          TERMUX_VERSION: undefined,
+        },
       },
     );
     const stdoutChunks: Buffer[] = [];
@@ -1884,9 +1870,8 @@ describe("delete operator — dw / de / db / d$ / d0 / dd", () => {
   it("clipboard read helper treats no text as an empty successful read", async () => {
     const helperSource = await getClipboardReadHelperSourceWithMock(
       [
-        "{",
-        "  async hasText() { return false; },",
-        '  async getText() { throw new Error("No string found"); },',
+        "export function getNativeClipboard() {",
+        "  return { async getText() { return null; } };",
         "}",
       ].join("\n"),
     );
@@ -1895,6 +1880,37 @@ describe("delete operator — dw / de / db / d$ / d0 / dd", () => {
 
     assert.equal(result.code, 0, result.stderr);
     assert.equal(result.signal, null);
+    assert.equal(result.stdout, "");
+  });
+
+  it("clipboard read helper writes the clipboard text", async () => {
+    const helperSource = await getClipboardReadHelperSourceWithMock(
+      [
+        "export function getNativeClipboard() {",
+        '  return { async getText() { return "pasted text"; } };',
+        "}",
+      ].join("\n"),
+    );
+
+    const result = await runClipboardHelperSource(helperSource, "");
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.signal, null);
+    assert.equal(result.stdout, "pasted text");
+  });
+
+  it("clipboard read helper exits non-zero when no clipboard is available", async () => {
+    const helperSource = await getClipboardReadHelperSourceWithMock(
+      [
+        "export function getNativeClipboard() {",
+        "  return undefined;",
+        "}",
+      ].join("\n"),
+    );
+
+    const result = await runClipboardHelperSource(helperSource, "");
+
+    assert.notEqual(result.code, 0);
     assert.equal(result.stdout, "");
   });
 
